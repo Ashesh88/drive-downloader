@@ -1,0 +1,208 @@
+(async () => {
+  const norm = s => (s || '').replace(/[’‘]/g, "'").replace(/[*?]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  // ================= CONFIG =================
+  const RADIOS = {
+    'address visited': 'Yes',
+    'address is traceable': 'Yes',
+    'traceability': 'Easy',
+    'contacted person at residence': 'Self',
+    'applicant / borrower confirmed': 'Yes',
+    'case open': 'Close',
+    // 'vehicle sighted' jaan-bujhkar skip hai
+  };
+
+  const SELECTS = {
+    're-schedule appointment': 'No',
+    'is this pincode right': 'Yes',
+    'fe status': 'Picked Up',
+    'fe sub-status': 'Submitted',
+    'with agricultural product': 'No',
+    'met with in person': 'Yes',
+    'positive / negative': 'Positive',
+    'submission status': 'Picked Up',
+    'submission sub-status': 'Submitted',
+    'supervisor status': 'Close',
+  };
+
+  const COMMENT = name =>
+    `Visited at the given address met Mr. ${name} who confirmed customer name and stay at given address, also he confirmed the Verbally vehicle is used by Mr. ${name} for Agriculture Purpose.`;
+
+  const IMAGE_FIELDS = ['image1', 'image2', 'image3', 'image4', 'image5', 'image6'];
+  const MAX_BYTES = 495000;              // 500 KB se thoda neeche
+  const ALLOWED = /\.(jpe?g|png)$/i;     // .jpg / .jpeg / .png
+  // ==========================================
+
+  const fire = el =>
+    ['input', 'change'].forEach(t => el.dispatchEvent(new Event(t, { bubbles: true })));
+
+  function findLabel(key, startsWith) {
+    const c = [...document.querySelectorAll('label,span,div,td,th,p,b,strong')]
+      .filter(e => {
+        const t = norm(e.textContent);
+        return (startsWith ? t.startsWith(key) : t.includes(key)) && e.textContent.length < 150;
+      });
+    c.sort((a, b) => a.textContent.length - b.textContent.length);
+    return c[0];
+  }
+
+  function container(label, sel) {
+    let n = label;
+    for (let i = 0; i < 6 && n; i++) {
+      if (n.querySelector && n.querySelector(sel)) return n;
+      n = n.parentElement;
+    }
+  }
+
+  function optText(r) {
+    if (r.id) {
+      const l = document.querySelector(`label[for="${r.id}"]`);
+      if (l) return l.textContent;
+    }
+    const p = r.closest('label');
+    return p ? p.textContent : r.value;
+  }
+
+  // ---------- 1) Radios ----------
+  for (const [key, ans] of Object.entries(RADIOS)) {
+    const lb = findLabel(key, true);
+    const box = lb && container(lb, 'input[type=radio]');
+    const r = box && [...box.querySelectorAll('input[type=radio]')]
+      .find(x => norm(optText(x)) === norm(ans) || norm(x.value) === norm(ans));
+    if (r) {
+      if (!r.checked) r.click();
+      fire(r);
+      console.log('OK radio   :', key, '=', ans);
+    } else {
+      console.warn('NOT FOUND radio:', key);
+    }
+    await sleep(200);
+  }
+
+  // ---------- 2) Dropdowns ----------
+  const selSetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set;
+  for (const [key, ans] of Object.entries(SELECTS)) {
+    const lb = findLabel(key, false);
+    const box = lb && container(lb, 'select');
+    const s = box && box.querySelector('select');
+    if (!s) { console.warn('NOT FOUND select:', key); continue; }
+    const o = [...s.options].find(x => norm(x.text) === norm(ans));
+    if (o) {
+      selSetter.call(s, o.value);
+      fire(s);
+      console.log('OK select  :', key, '=', ans);
+    } else {
+      console.warn('Option nahi mila:', key, '->', ans);
+    }
+    await sleep(200);
+  }
+
+  // ---------- 3) End Use Verification Comments ----------
+  const INPUT_SEL = 'input:not([type=radio]):not([type=checkbox]):not([type=hidden]):not([type=file])';
+  const nameLabel = findLabel("applicant's / borrower's name", true);
+  const nameBox = nameLabel && container(nameLabel, INPUT_SEL);
+  const nameInput = nameBox && nameBox.querySelector(INPUT_SEL);
+  const candidate = nameInput ? nameInput.value.trim() : '';
+
+  if (!candidate) {
+    console.warn('Applicant / Borrower Name nahi mila ya khali hai, comment skip');
+  } else {
+    const cLabel = findLabel('end use verification comments', true);
+    const cBox = cLabel && container(cLabel, 'textarea');
+    const ta = cBox && cBox.querySelector('textarea');
+    if (ta) {
+      const taSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+      taSetter.call(ta, COMMENT(candidate));
+      fire(ta);
+      console.log('OK comment : name =', candidate);
+    } else {
+      console.warn('NOT FOUND: End Use Verification Comments textarea');
+    }
+  }
+
+  // ---------- 4) Image picker (JPG/PNG, max 500 KB) ----------
+  function findFileInput(key) {
+    const labels = [...document.querySelectorAll('label,span,div,td,th,p,b,strong')]
+      .filter(e => norm(e.textContent) === key);
+    for (const lb of labels) {
+      let n = lb;
+      for (let i = 0; i < 4 && n; i++) {
+        const inp = n.querySelector && n.querySelector('input[type=file]');
+        if (inp) return inp;
+        n = n.parentElement;
+      }
+    }
+  }
+
+  const toBlob = (canvas, q) => new Promise(res => canvas.toBlob(res, 'image/jpeg', q));
+
+  // Chhoti file (JPG/PNG) as-is. Badi file (JPG ya PNG) -> compress karke JPG.
+  async function shrink(file) {
+    if (file.size <= MAX_BYTES) return file;
+    const bmp = await createImageBitmap(file);
+    let scale = 1;
+    for (let round = 0; round < 8; round++) {
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(bmp.width * scale);
+      canvas.height = Math.round(bmp.height * scale);
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#fff';            // PNG transparency ke liye white background
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+      for (let q = 0.9; q >= 0.4; q -= 0.1) {
+        const blob = await toBlob(canvas, q);
+        if (blob && blob.size <= MAX_BYTES) {
+          return new File([blob], file.name.replace(/\.\w+$/, '') + '.jpg', { type: 'image/jpeg' });
+        }
+      }
+      scale *= 0.85;
+    }
+    return null;
+  }
+
+  document.getElementById('__pickImgBtn')?.remove();
+  document.getElementById('__pickImgInput')?.remove();
+
+  const picker = document.createElement('input');
+  picker.type = 'file';
+  picker.id = '__pickImgInput';
+  picker.accept = '.jpg,.jpeg,.png,image/jpeg,image/png';
+  picker.multiple = true;
+  picker.style.display = 'none';
+  document.body.appendChild(picker);
+
+  const btn = document.createElement('button');
+  btn.id = '__pickImgBtn';
+  btn.textContent = 'Pick Images (JPG/PNG, max 500KB)';
+  btn.style.cssText = 'position:fixed;top:80px;right:20px;z-index:99999;padding:10px 16px;background:#0d6efd;color:#fff;border:0;border-radius:6px;font-size:15px;cursor:pointer;';
+  btn.onclick = () => picker.click();
+  document.body.appendChild(btn);
+
+  picker.onchange = async () => {
+    const files = [...picker.files];
+    let slot = 0;
+    for (const file of files) {
+      if (!ALLOWED.test(file.name)) { console.warn('SKIP (sirf JPG/PNG allowed):', file.name); continue; }
+      if (slot >= IMAGE_FIELDS.length) { console.warn('SKIP (fields khatam):', file.name); continue; }
+
+      const out = await shrink(file);
+      if (!out) { console.warn('SKIP (500KB tak chhoti nahi ho payi):', file.name); continue; }
+
+      const key = IMAGE_FIELDS[slot];
+      const inp = findFileInput(key);
+      if (!inp) { console.warn('NOT FOUND:', key); continue; }
+
+      const dt = new DataTransfer();
+      dt.items.add(out);
+      inp.files = dt.files;
+      fire(inp);
+      console.log('OK', key, '=', out.name, '(' + Math.round(out.size / 1024) + ' KB)');
+      slot++;
+    }
+    picker.value = '';
+    console.log('Images done.');
+  };
+
+  console.log('Form fill done. Top-right ke "Pick Images" button se photos select karo.');
+})();
